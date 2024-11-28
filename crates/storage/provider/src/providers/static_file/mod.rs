@@ -81,6 +81,16 @@ mod tests {
         Ok(())
     }
 
+    /// Creates a lockfile in the given directory if it doesn't exist
+    fn create_lockfile(dir: impl AsRef<Path>) -> std::io::Result<()> {
+        let lockfile_path = dir.as_ref().join(".lock");
+        if !lockfile_path.exists() {
+            fs::write(lockfile_path, "")
+        } else {
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_snap() {
         // Ranges
@@ -162,7 +172,7 @@ mod tests {
 
     #[test]
     fn test_header_truncation() {
-        let (static_dir, _) = create_test_static_files_dir();
+        let (tempdir, static_dir) = create_test_static_files_dir();
 
         let blocks_per_file = 10; // Number of headers per file
         let files_per_range = 3; // Number of files per range (data/conf/offset files)
@@ -175,6 +185,8 @@ mod tests {
             let sf_rw = StaticFileProvider::<EthPrimitives>::read_write(&static_dir)
                 .expect("Failed to create static file provider")
                 .with_custom_blocks_per_file(blocks_per_file);
+
+            create_lockfile(&static_dir).expect("Failed to create lockfile");
 
             let mut header_writer = sf_rw.latest_writer(StaticFileSegment::Headers).unwrap();
 
@@ -274,7 +286,7 @@ mod tests {
 
             assert_eq!(sf_rw.get_highest_static_file_block(StaticFileSegment::Headers), Some(tip));
             assert_eq!(
-                fs::read_dir(static_dir.as_ref()).unwrap().count(),
+                fs::read_dir(static_dir.as_ref() as &Path).unwrap().count(),
                 initial_file_count as usize
             );
 
@@ -295,6 +307,9 @@ mod tests {
                 .unwrap();
             }
         }
+
+        // Keep tempdir alive until end of test
+        drop(tempdir);
     }
 
     /// 3 block ranges are built
@@ -308,6 +323,8 @@ mod tests {
         segment: StaticFileSegment,
         blocks_per_file: u64,
     ) {
+        create_lockfile(sf_rw.path()).expect("Failed to create lockfile");
+
         fn setup_block_ranges(
             writer: &mut StaticFileProviderRWRefMut<'_, EthPrimitives>,
             sf_rw: &StaticFileProvider<EthPrimitives>,
@@ -316,6 +333,7 @@ mod tests {
             mut tx_count: u64,
             next_tx_num: &mut u64,
         ) {
+            println!("Setting up block range {:?} for segment {:?}", block_range, segment);
             let mut receipt = Receipt::default();
             let mut tx = TransactionSigned::default();
 
@@ -338,6 +356,13 @@ mod tests {
                 }
             }
             writer.commit().unwrap();
+
+            // Print directory contents after each range
+            println!("Directory contents after range {:?}:", block_range);
+            let files = std::fs::read_dir(sf_rw.path()).unwrap().collect::<Vec<_>>();
+            for file in files {
+                println!("  {:?}", file.unwrap().file_name());
+            }
 
             // Calculate expected values based on the range and transactions
             let expected_block = block_range.end - 1;
@@ -363,6 +388,12 @@ mod tests {
 
         let mut writer = sf_rw.latest_writer(segment).unwrap();
         let mut next_tx_num = 0;
+
+        println!("Initial directory contents:");
+        let files = std::fs::read_dir(sf_rw.path()).unwrap().collect::<Vec<_>>();
+        for file in files {
+            println!("  {:?}", file.unwrap().file_name());
+        }
 
         // Loop through setup scenarios
         for (block_range, tx_count) in block_ranges.iter().zip(tx_counts.iter()) {
@@ -479,7 +510,8 @@ mod tests {
         }
 
         for segment in segments {
-            let (static_dir, _) = create_test_static_files_dir();
+            // Keep _tempdir alive by storing it in a variable
+            let (tempdir, static_dir) = create_test_static_files_dir();
 
             let sf_rw = StaticFileProvider::read_write(&static_dir)
                 .expect("Failed to create static file provider")
@@ -547,6 +579,9 @@ mod tests {
                 .map_err(|err| eyre::eyre!("Test case {case}: {err}"))
                 .unwrap();
             }
+
+            // Keep tempdir alive until end of test scope
+            drop(tempdir);
         }
     }
 }
